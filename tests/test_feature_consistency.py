@@ -309,3 +309,26 @@ def test_speed_figure_par_and_track_variant(test_env):
     assert row["speed_fig_mean_3"] == pytest.approx(-0.5)
     assert row["speed_fig_max_5"] == pytest.approx(-0.5)
     parser.close()
+
+
+def test_past_popularity_features(test_env):
+    """過去走の人気の平均と、(人気 - 着順)の平均が、対象レースより前の走だけから計算されることを検証する"""
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+    horse_id = "2020100002"
+    # 過去2走: 5番人気1着(+4), 1番人気3着(-2)。対象レースC自身(2番人気)は集計に含めない
+    for race_id, date_str, rank, popularity in [("202001010101", "2024-01-01", "1", 5),
+                                                 ("202001010201", "2024-02-01", "3", 1),
+                                                 ("202001010301", "2024-03-01", "2", 2)]:
+        _insert_race(conn, race_id, date_str)
+        _insert_result(conn, race_id, horse_id, rank=rank)
+        _insert_horse_result(conn, horse_id, date_str, race_id, rank=rank)
+        conn.execute("UPDATE horse_results SET popularity = ? WHERE horse_id = ? AND race_id = ?",
+                     (popularity, horse_id, race_id))
+    conn.commit()
+
+    df = FeatureBuilder(config_path=test_env).build_features()
+    row = df[df["race_id"] == "202001010301"].iloc[0]
+    assert row["popularity_mean_5"] == pytest.approx(3.0)
+    assert row["pop_rank_diff_mean_5"] == pytest.approx(1.0)
+    parser.close()

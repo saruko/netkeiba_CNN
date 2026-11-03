@@ -14,6 +14,7 @@ from src.training.train import Trainer
 from src.training.calibration import Calibrator
 from src.simulation.simulator import Simulator
 from src.predict.predictor import Predictor
+from src.preprocessing.audit import run_audit
 
 def daterange(start_date, end_date):
     for n in range(int((end_date - start_date).days) + 1):
@@ -32,6 +33,44 @@ def _parse_scrape_date(date_str: str, is_end: bool) -> datetime:
         return datetime(year, month, last_day)
     return datetime(year, month, 1)
 
+def scrape_failures_path(parser) -> str:
+    """取得失敗の記録先 (DBと同じフォルダ)。audit コマンドが未解消の失敗を報告するために使う"""
+    return os.path.join(os.path.dirname(parser.db_path), "scrape_failures.tsv")
+
+def log_scrape_failure(path: str, kind: str, item_id: str, error: Exception):
+    with open(path, "a", encoding="utf-8") as f:
+        message = " ".join(str(error).split())  # タブ・改行を含めない
+        f.write(f"{datetime.now().isoformat(timespec='seconds')}\t{kind}\t{item_id}\t{message}\n")
+
+def _horse_page_has_race(conn, horse_id: str, race_id: str) -> bool:
+    cursor = conn.execute("SELECT 1 FROM horse_results WHERE horse_id = ? AND race_id = ? LIMIT 1",
+                          (horse_id, race_id))
+    return cursor.fetchone() is not None
+
+def update_horse_pages(source, parser, race_id: str, failures_path: str):
+    """出走馬の成績・血統ページを取得してパースする。
+    保存済みの成績ページにこのレースが載っていなければ、レースより前に保存された古いページなので再取得する。
+    (再取得しないと、ページ保存後に走ったレースが過去走から欠け、前走・間隔などの特徴量が誤る)
+    取消・除外の馬は成績ページに載らない可能性があるため、この判定から除く。"""
+    cursor = parser.conn.execute("SELECT horse_id, rank FROM results WHERE race_id = ?", (race_id,))
+    for h_id, rank in cursor.fetchall():
+        print(f"  Horse: {h_id}")
+        try:
+            source.get_horse_html(h_id)
+            source.get_ped_html(h_id)
+            parser.parse_horse(h_id)
+            if rank not in (None, "取消", "除外") and not _horse_page_has_race(parser.conn, h_id, race_id):
+                print(f"  Saved page of horse {h_id} predates race {race_id}. Re-fetching.")
+                source.get_horse_html(h_id, force=True)
+                parser.parse_horse(h_id)
+                if not _horse_page_has_race(parser.conn, h_id, race_id):
+                    print(f"  Warning: race {race_id} is still missing from the page of horse {h_id}.")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to fetch data for horse {h_id}: {e}. Skipping.")
+            log_scrape_failure(failures_path, "horse", h_id, e)
+            continue
+        parser.parse_ped(h_id)
+
 def handle_scrape(args):
     config_path = args.config
     source = NetkeibaSource(config_path)
@@ -47,6 +86,7 @@ def handle_scrape(args):
         return
         
     print(f"Scraping from {start_dt.date()} to {end_dt.date()}...")
+    failures_path = scrape_failures_path(parser)
     
     race_ids = []
     for single_date in daterange(start_dt, end_dt):
@@ -69,6 +109,7 @@ def handle_scrape(args):
         except requests.exceptions.RequestException as e:
             # 個別レースの取得失敗でバッチ全体を止めない(異常なHTMLはディスクに保存されないため安全)
             print(f"Failed to fetch race {r_id}: {e}. Skipping.")
+            log_scrape_failure(failures_path, "race", r_id, e)
             continue
 
         parsed = parser.parse_race(r_id)
@@ -76,23 +117,7 @@ def handle_scrape(args):
             print(f"Skipped parsing for race {r_id} (HTML might not exist).")
             continue
 
-        # SQLiteから出走馬の馬IDを取得
-        conn = parser.conn
-        cursor = conn.cursor()
-        cursor.execute("SELECT horse_id FROM results WHERE race_id = ?", (r_id,))
-        horse_ids = [row[0] for row in cursor.fetchall()]
-
-        # 出走馬の成績と血統の取得・パース
-        for h_id in horse_ids:
-            print(f"  Horse: {h_id}")
-            try:
-                source.get_horse_html(h_id)
-                source.get_ped_html(h_id)
-            except requests.exceptions.RequestException as e:
-                print(f"Failed to fetch data for horse {h_id}: {e}. Skipping.")
-                continue
-            parser.parse_horse(h_id)
-            parser.parse_ped(h_id)
+        update_horse_pages(source, parser, r_id, failures_path)
 
     parser.close()
     print("Scraping and parsing complete.")
@@ -113,6 +138,9 @@ def handle_reparse(args):
                 print(f"Failed to parse {category}/{item_id}: {e}")
     parser.close()
     print("Re-parse complete.")
+
+def handle_audit(args):
+    run_audit(args.config)
 
 def handle_build_features(args):
     print("Building features...")
@@ -156,6 +184,9 @@ def main():
     # reparse
     subparsers.add_parser("reparse", help="Re-parse saved HTML into SQLite (after parser changes)")
 
+    # audit
+    subparsers.add_parser("audit", help="Check the consistency and coverage of scraped data in SQLite")
+
     # build-features
     parser_build = subparsers.add_parser("build-features", help="Process SQLite data and build Parquet features")
     
@@ -178,6 +209,8 @@ def main():
         handle_scrape(args)
     elif args.command == "reparse":
         handle_reparse(args)
+    elif args.command == "audit":
+        handle_audit(args)
     elif args.command == "build-features":
         handle_build_features(args)
     elif args.command == "train":
