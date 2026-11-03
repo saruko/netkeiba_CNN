@@ -285,7 +285,7 @@ class FeatureBuilder:
 
         df_hr = df_horse_results.copy()
         # 頭数・クラス列が無い旧DB(reparse前)でも動作させる。ただし相対着順・脚質・クラス特徴量は欠損になる
-        for col in ["n_horses", "race_class"]:
+        for col in ["n_horses", "race_class", "popularity"]:
             if col not in df_hr.columns:
                 df_hr[col] = np.nan
         if len(df_hr) > 0 and df_hr["n_horses"].isna().all():
@@ -331,6 +331,10 @@ class FeatureBuilder:
         df_hr["rank_ratio"] = df_hr["rank_num"] / n_horses_hr
         df_hr["first_corner_pos"] = (df_hr["first_corner"] - 1) / (n_horses_hr - 1).where(n_horses_hr > 1)
         df_hr["class_level"] = df_hr["race_class"].map(CLASS_LEVELS)
+        # 人気 - 着順: 正なら市場の評価より上位に来た(市場が過小評価していた)
+        # (列が全て NULL の旧DBでも object 型にならないよう数値化する)
+        df_hr["popularity"] = pd.to_numeric(df_hr["popularity"], errors="coerce")
+        df_hr["pop_rank_diff"] = df_hr["popularity"] - df_hr["rank_num"]
 
         # 前走間隔は地方・障害を含む全出走から求める
         df_hr_all = df_hr[["horse_id", "date"]].copy()
@@ -373,6 +377,9 @@ class FeatureBuilder:
             "first_corner_mean_5": ("first_corner", 5, "mean"),
             "last_corner_mean_5": ("last_corner", 5, "mean"),
             "first_corner_pos_mean_5": ("first_corner_pos", 5, "mean"),
+            # 過去走の市場評価(人気)と、それに対する実際の着順
+            "popularity_mean_5": ("popularity", 5, "mean"),
+            "pop_rank_diff_mean_5": ("pop_rank_diff", 5, "mean"),
         }
 
         df_hr_feats = df_hr[["horse_id", "date"]].copy()

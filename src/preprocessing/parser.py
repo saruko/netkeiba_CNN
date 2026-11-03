@@ -105,6 +105,11 @@ class NetkeibaParser:
         self._ensure_column("horse_results", "prize", "REAL")
         self._ensure_column("horse_results", "n_horses", "INTEGER")
         self._ensure_column("horse_results", "race_class", "TEXT")
+        # 成績ページにある過去走の条件・騎手・市場評価 (reparse で保存済みHTMLから埋まる)
+        for column, coltype in [("weather", "TEXT"), ("surface_state", "TEXT"), ("jockey_id", "TEXT"),
+                                ("weight_carrier", "REAL"), ("tansho_odds", "REAL"), ("popularity", "INTEGER"),
+                                ("horse_weight", "REAL"), ("weight_diff", "REAL"), ("pace", "TEXT")]:
+            self._ensure_column("horse_results", column, coltype)
         
         # peds テーブル
         cursor.execute("""
@@ -202,6 +207,18 @@ class NetkeibaParser:
             return int(s)
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_horse_weight(weight_str: str) -> tuple:
+        """馬体重と増減を返す (例: "480(-2)" -> (480.0, -2.0), "480" -> (480.0, None), "計不" -> (None, None))"""
+        weight_str = (weight_str or "").strip()
+        if not weight_str or weight_str == "計不":
+            return None, None
+        w_match = re.search(r"(\d+)\(([-+]*\d+)\)", weight_str)
+        if w_match:
+            return float(w_match.group(1)), float(w_match.group(2))
+        w_match_only = re.search(r"(\d+)", weight_str)
+        return (float(w_match_only.group(1)) if w_match_only else None), None
 
     def parse_time(self, time_str: str) -> float:
         """'1:33.1' のようなタイム文字列を秒数に変換する。変換不能な表記はNoneを返す。"""
@@ -361,18 +378,7 @@ class NetkeibaParser:
                 popularity = self._to_int(cols[13].get_text())
                 
                 # 馬体重と増減 (例: "480(-2)", "502(+10)", "計不")
-                weight_str = cols[14].get_text().strip()
-                horse_weight = None
-                weight_diff = None
-                if weight_str and weight_str != "計不":
-                    w_match = re.search(r"(\d+)\(([-+]*\d+)\)", weight_str)
-                    if w_match:
-                        horse_weight = float(w_match.group(1))
-                        weight_diff = float(w_match.group(2))
-                    else:
-                        w_match_only = re.search(r"(\d+)", weight_str)
-                        if w_match_only:
-                            horse_weight = float(w_match_only.group(1))
+                horse_weight, weight_diff = self._parse_horse_weight(cols[14].get_text())
 
                 # 調教師ID
                 trainer_link = cols[18].find("a") if len(cols) > 18 else None
@@ -547,15 +553,32 @@ class NetkeibaParser:
             except ValueError:
                 prize = None
 
+            # 過去走の条件・騎手・市場評価 (空欄や "---" は None)
+            weather = get_text(cols, "天気") or None
+            surface_state = get_text(cols, "馬場") or None
+            jockey_td = get_col(cols, "騎手")
+            jockey_link = jockey_td.find("a") if jockey_td is not None else None
+            j_match = re.search(r"jockey/.*?(\d+)", jockey_link.get("href", "")) if jockey_link else None
+            jockey_id = j_match.group(1) if j_match else None
+            weight_carrier = self._to_float(get_text(cols, "斤量"))
+            tansho_odds = self._to_float(get_text(cols, "オッズ"))
+            popularity = self._to_int(get_text(cols, "人気"))
+            horse_weight, weight_diff = self._parse_horse_weight(get_text(cols, "馬体重"))
+            pace = get_text(cols, "ペース") or None
+
             cursor.execute("""
             INSERT OR REPLACE INTO horse_results (
                 horse_id, date, race_id, rank, distance, course_type, place,
-                time_sec, margin, last_3f, passing_order, prize, n_horses, race_class
+                time_sec, margin, last_3f, passing_order, prize, n_horses, race_class,
+                weather, surface_state, jockey_id, weight_carrier, tansho_odds, popularity,
+                horse_weight, weight_diff, pace
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 horse_id, date_str, race_id, rank, distance, course_type, place,
-                time_sec, margin, last_3f, passing_order, prize, n_horses, race_class
+                time_sec, margin, last_3f, passing_order, prize, n_horses, race_class,
+                weather, surface_state, jockey_id, weight_carrier, tansho_odds, popularity,
+                horse_weight, weight_diff, pace
             ))
 
         self.conn.commit()

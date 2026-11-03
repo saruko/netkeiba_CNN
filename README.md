@@ -100,6 +100,11 @@ python main.py scrape --start 2018-01 --to 2025-12
 - 取得済みデータはすべて `data/html/` にgzip保存されており、再実行時にスキップされます
 - ネットワークエラーで個別レースの取得に失敗しても、バッチ全体は止まりません
 - 中断後に同じコマンドを再実行すれば、続きから取得します
+- 取得に失敗したページは `data/scrape_failures.tsv` に記録されます(`audit` コマンドで未解消のものを確認できます)
+
+**馬の成績ページの更新:** 保存済みの成績ページに処理中のレースが載っていない場合(ページがレースより前に保存された場合)は、
+自動で再取得します。追加取得(毎週・毎月の scrape)で、前回以降に走ったレースが過去走から欠けるのを防ぐためです。
+以前の版で追加取得をしていた場合は、その期間を再度 `scrape` すると古いページが取り直されます。
 
 #### テスト用 (少量で動作確認)
 
@@ -107,6 +112,28 @@ python main.py scrape --start 2018-01 --to 2025-12
 # 最初の10レースだけ取得して動作確認
 python main.py scrape --start 2024-01 --to 2024-01 --limit-races 10
 ```
+
+#### データの検査
+
+```
+python main.py audit
+```
+
+DBの整合性と欠けを検査し、検査ごとの件数と例を表示します(対象はJRA平地の確定レース)。問題の一覧は `data/audit_report.csv` に保存されます。
+
+| 検査 | 内容 |
+|------|------|
+| race_missing_fields | 日付・距離・コース種別・開催場の欠損 |
+| n_horses_mismatch | 結果表の行数が成績ページの頭数と一致しない |
+| no_winner / missing_tansho_return | 1着馬・単勝払戻が無い |
+| tansho_payoff_mismatch | 1着馬の単勝払戻が 単勝オッズ×100 と一致しない(パース誤り、または同着) |
+| missing_odds | 完走馬の単勝オッズが欠損 |
+| rank_time_inversion | 着順が下の馬の方がタイムが速い(降着は除く) |
+| horse_page_missing / horse_page_stale | 出走馬の成績ページが無い / ページにそのレースが載っていない(古い) |
+| ped_missing | 血統が無い |
+| scrape_failure_unresolved | 取得に失敗し、まだ取り直されていないページ |
+
+`build-features` の前に実行し、NG の件数が出走数に対して無視できない割合なら、原因を直してから学習してください。
 
 ---
 
@@ -130,7 +157,10 @@ SQLiteのデータを読み込み、以下のような特徴量をParquetファ�
 
 障害レース・地方競馬・出走取消/除外の馬は対象外として除外されます。
 
-**パーサー更新後の注意:** 頭数・クラスの列はHTMLの再パースで埋まります。既存の `data/` がある場合は、
+- 過去走の人気の平均(直近5走)と、過去走の (人気 − 着順) の平均(正なら市場の評価より上位に来ている)
+
+**パーサー更新後の注意:** 頭数・クラス、および過去走の天気・馬場・騎手・斤量・オッズ・人気・馬体重・ペースの列は
+HTMLの再パースで埋まります。既存の `data/` がある場合は、
 `build-features` の前に一度 `python main.py reparse` を実行してください(保存済みHTMLから再生成するため通信は発生しません)。
 
 ---
@@ -299,6 +329,7 @@ python main.py simulate
 |---------|------|-------------|
 | `python main.py scrape --start YYYY-MM --to YYYY-MM` | データ収集 | 1年分≒15時間 |
 | `python main.py reparse` | 保存済みHTMLからDBを再生成 (パーサー更新後) | データ量による |
+| `python main.py audit` | 取得データの整合性・欠けの検査 | 数秒〜数十秒 |
 | `python main.py build-features` | 特徴量生成 | 数分 |
 | `python main.py train` | モデル学習 | 数分〜10分 |
 | `python main.py train --tune` | 学習+ハイパラ探索 | 30分〜1時間 |

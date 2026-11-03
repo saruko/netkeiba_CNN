@@ -105,7 +105,7 @@ def test_parse_horse_header_based(test_env):
                "タイム", "着差", "ﾀｲﾑ指数", "ﾀｲﾑ指数M", "ｽﾀｰﾄ指数", "追走指数", "上がり指数",
                "通過", "ペース", "上り", "馬体重", "厩舎ｺﾒﾝﾄ", "備考", "勝ち馬(2着馬)", "賞金"]
     values = ["2024/06/09", "3中山6", "晴", "10", '<a href="/race/202406030610/">テストレース</a>', "",
-              "16", "3", "5", "4.2", "2", "1", "テスト騎手", "55", "芝1600", "", "良", "",
+              "16", "3", "5", "4.2", "2", "1", '<a href="/jockey/result/recent/01015/">テスト騎手</a>', "55", "芝1600", "", "良", "",
               "1:33.5", "-0.2", "", "", "", "", "", "3-3-2-1", "35.1-34.8", "34.5",
               "480(+2)", "", "", "2着馬名", "1,100.0"]
 
@@ -142,6 +142,13 @@ def test_parse_horse_header_based(test_env):
     row = cursor.fetchone()
     assert row == ("2024-06-09", "202406030610", "1", 1600, "芝", "中山",
                    93.5, -0.2, 34.5, "3-3-2-1", 1100.0, 16, "その他")
+
+    cursor.execute("""
+        SELECT weather, surface_state, jockey_id, weight_carrier, tansho_odds, popularity,
+               horse_weight, weight_diff, pace
+        FROM horse_results WHERE horse_id=?
+    """, (horse_id,))
+    assert cursor.fetchone() == ("晴", "良", "01015", 55.0, 4.2, 2, 480.0, 2.0, "35.1-34.8")
 
     conn.close()
     parser.close()
