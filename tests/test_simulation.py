@@ -79,3 +79,17 @@ def test_bootstrap_recovery_ci():
                            "payoff": [0] * 45 + [1000] * 5})
     lower, upper = bootstrap_recovery_ci(df_var)
     assert 0.0 <= lower < 100.0 < upper <= 1000.0
+
+
+def test_bootstrap_logloss_diff_ci():
+    from src.simulation.simulator import bootstrap_logloss_diff_ci
+    # 全レースで a の1着馬確率が 0.5、b が 0.25 -> 差は log(0.25) - log(0.5) = -log 2 で一定
+    df = pd.DataFrame({
+        "race_id": ["r1", "r1", "r2", "r2"],
+        "rank_num": [1, 2, 2, 1],
+        "a": [0.5, 0.5, 0.5, 0.5],
+        "b": [0.25, 0.75, 0.75, 0.25],
+    })
+    mean, lower, upper = bootstrap_logloss_diff_ci(df, "a", "b")
+    assert mean == pytest.approx(-np.log(2))
+    assert (lower, upper) == pytest.approx((-np.log(2), -np.log(2)))

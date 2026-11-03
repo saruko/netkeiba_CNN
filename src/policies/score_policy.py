@@ -2,6 +2,12 @@ from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
 
+def market_implied_probs(df: pd.DataFrame) -> np.ndarray:
+    """単勝オッズから市場の暗黙勝率を求める: (1/オッズ) をレース内で合計1に正規化(控除率分を除去)"""
+    inv = 1.0 / df["tansho_odds"].where(df["tansho_odds"] > 0)
+    return (inv / inv.groupby(df["race_id"]).transform("sum")).fillna(0).values
+
+
 class ScorePolicy(ABC):
     @abstractmethod
     def calculate(self, raw_scores: np.ndarray, df_race: pd.DataFrame) -> np.ndarray:
@@ -37,3 +43,12 @@ class CalibratedProbPolicy(ScorePolicy):
 
     def calculate(self, raw_scores: np.ndarray, df_race: pd.DataFrame) -> np.ndarray:
         return self.calibration_model.predict_proba(raw_scores, df_race["race_id"].values)
+
+
+class MarketCombinedProbPolicy(ScorePolicy):
+    """モデルのスコアと市場の暗黙勝率(df_race の tansho_odds から算出)を MarketCombiner で結合した勝率"""
+    def __init__(self, combiner):
+        self.combiner = combiner
+
+    def calculate(self, raw_scores: np.ndarray, df_race: pd.DataFrame) -> np.ndarray:
+        return self.combiner.predict_proba(raw_scores, market_implied_probs(df_race), df_race["race_id"].values)

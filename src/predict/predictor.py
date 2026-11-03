@@ -7,7 +7,7 @@ import sqlite3
 from src.scraping.netkeiba_source import NetkeibaSource
 from src.preprocessing.parser import NetkeibaParser
 from src.preprocessing.features import FeatureBuilder
-from src.policies.score_policy import CalibratedProbPolicy
+from src.policies.score_policy import CalibratedProbPolicy, MarketCombinedProbPolicy
 from src.policies.bet_policy import ExpectedValueBet
 from src.training.train import Trainer
 
@@ -81,10 +81,15 @@ class Predictor:
         X = df_race[self.trainer.features]
         raw_scores = model.predict(X)
         
-        # 校正済み勝率
-        prob_policy = CalibratedProbPolicy(calib_model)
-        win_probs = prob_policy.calculate(raw_scores, df_race)
-        
+        # 校正済み勝率。ライブオッズが取れた場合は市場との結合モデルの勝率を期待値計算に使う
+        # (結合モデルは確定オッズで推定しているため、発走前のオッズに対しては推定誤差が大きくなりうる)
+        win_probs = CalibratedProbPolicy(calib_model).calculate(raw_scores, df_race)
+        df_race["model_prob"] = win_probs
+        combiner_path = os.path.join(self.models_dir, "market_combiner.model")
+        if odds_map and os.path.exists(combiner_path):
+            win_probs = MarketCombinedProbPolicy(joblib.load(combiner_path)).calculate(raw_scores, df_race)
+            print("Using market-combined win probabilities.")
+
         df_race["raw_score"] = raw_scores
         df_race["win_prob"] = win_probs
         
@@ -101,7 +106,7 @@ class Predictor:
         # 結果の出力
         output_cols = [
             "race_id", "race_name", "bracket_num", "horse_num", 
-            "horse_id", "tansho_odds", "win_prob", "expected_value", "should_bet"
+            "horse_id", "tansho_odds", "model_prob", "win_prob", "expected_value", "should_bet"
         ]
         
         output_dir = os.path.dirname(self.builder.features_dir)

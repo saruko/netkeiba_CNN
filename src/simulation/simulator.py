@@ -7,8 +7,8 @@ import yaml
 import sqlite3
 import joblib
 import lightgbm as lgb
-from src.training.calibration import SoftmaxCalibrator
-from src.policies.score_policy import CalibratedProbPolicy
+from src.training.calibration import SoftmaxCalibrator, MarketCombiner
+from src.policies.score_policy import CalibratedProbPolicy, MarketCombinedProbPolicy, market_implied_probs
 from src.policies.bet_policy import ExpectedValueBet
 from src.training.train import Trainer
 
@@ -39,12 +39,6 @@ def bootstrap_recovery_ci(df_payoff: pd.DataFrame, n_boot: int = 2000, alpha: fl
     return float(lower), float(upper)
 
 
-def market_implied_probs(df: pd.DataFrame) -> np.ndarray:
-    """単勝オッズから市場の暗黙勝率を求める: (1/オッズ) をレース内で合計1に正規化(控除率分を除去)"""
-    inv = 1.0 / df["tansho_odds"].where(df["tansho_odds"] > 0)
-    return (inv / inv.groupby(df["race_id"]).transform("sum")).fillna(0).values
-
-
 def race_prob_metrics(df: pd.DataFrame, prob_col: str) -> dict:
     """レース単位の勝率予測の精度。
     log_loss: 各レースの1着馬に与えた確率の -log の平均(多項対数損失)
@@ -59,6 +53,19 @@ def race_prob_metrics(df: pd.DataFrame, prob_col: str) -> dict:
         "brier": float(sq_err.mean()),
         "n_races": int(len(winner_prob)),
     }
+
+
+def bootstrap_logloss_diff_ci(df: pd.DataFrame, prob_col_a: str, prob_col_b: str,
+                              n_boot: int = 2000, alpha: float = 0.05, seed: int = 0) -> tuple:
+    """レース単位LogLossの差 (a - b) の平均と95%信頼区間を、レース単位の対応のあるブートストラップで求める。
+    区間の上限が0未満なら a は b より有意に良い。1着馬のいないレースは除外する。"""
+    winners = df[df["rank_num"] == 1]
+    per_race = winners.groupby("race_id")[[prob_col_a, prob_col_b]].sum().clip(lower=1e-15)
+    diff = (-np.log(per_race[prob_col_a]) + np.log(per_race[prob_col_b])).values
+    rng = np.random.default_rng(seed)
+    means = np.array([diff[rng.integers(0, len(diff), size=len(diff))].mean() for _ in range(n_boot)])
+    lower, upper = np.percentile(means, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(diff.mean()), float(lower), float(upper)
 
 
 def evaluate_bets(df_test: pd.DataFrame, bet_col: str, df_returns: pd.DataFrame, label: str) -> dict:
@@ -101,6 +108,13 @@ def evaluate_bets(df_test: pd.DataFrame, bet_col: str, df_returns: pd.DataFrame,
         f"hit_rate_place_{label}": hit_rate_place,
         f"recovery_rate_place_{label}": recovery_rate_place,
     }
+
+
+# 勝率予測精度を比較する列とラベル / 期待値ベットの評価ラベル
+PROB_LABELS = [("win_prob", "lambdarank"), ("win_prob_binary", "binary"),
+               ("win_prob_combined", "combined"), ("market_prob", "market"),
+               ("market_recal_prob", "market_recal")]
+BET_LABELS = ["lambdarank", "binary", "combined"]
 
 
 class Simulator:
@@ -238,6 +252,14 @@ class Simulator:
             raw_scores_calib_binary = binary_model.predict(df_val_calib[self.trainer.features], raw_score=True)
             calib_binary = SoftmaxCalibrator().fit(raw_scores_calib_binary, df_val_calib["race_id"], is_winner_calib)
 
+            # 市場との結合モデル: p ∝ exp(α·s + β·log q)。校正データの確定オッズで推定する
+            combiner = MarketCombiner().fit(raw_scores_calib, market_implied_probs(df_val_calib),
+                                            df_val_calib["race_id"], is_winner_calib)
+            # 比較用: 市場確率だけを再校正したもの(α=0, p ∝ q^β)。本命・大穴バイアスの補正分を
+            # モデルの寄与と取り違えないよう、結合モデルはこれと比較する
+            log_q_calib = np.log(np.clip(market_implied_probs(df_val_calib), MarketCombiner.MIN_MARKET_PROB, None))
+            market_recal = SoftmaxCalibrator().fit(log_q_calib, df_val_calib["race_id"], is_winner_calib)
+
             # 予測と期待値ベット判定 (主モデル: LambdaRank)
             raw_scores_test = model.predict(df_test[self.trainer.features])
             prob_policy = CalibratedProbPolicy(calib)
@@ -262,20 +284,32 @@ class Simulator:
 
             # 市場(単勝オッズ)の暗黙勝率。モデルの勝率がこれより高精度でなければエッジの根拠はない
             df_test["market_prob"] = market_implied_probs(df_test)
+            log_q_test = np.log(np.clip(df_test["market_prob"].values, MarketCombiner.MIN_MARKET_PROB, None))
+            df_test["market_recal_prob"] = market_recal.predict_proba(log_q_test, df_test["race_id"].values)
+
+            # 結合モデル(LambdaRankスコア + 市場)の勝率と期待値ベット判定
+            win_probs_combined = MarketCombinedProbPolicy(combiner).calculate(raw_scores_test, df_test)
+            df_test["win_prob_combined"] = win_probs_combined
+            df_test["should_bet_combined"] = bet_policy.decide_bets(df_test, win_probs_combined)
 
             window_result = {
                 "window": i + 1,
                 "period": f"{start_date.date()}~{end_date.date()}",
+                "combiner_alpha": combiner.alpha,
+                "combiner_alpha_se": combiner.alpha_se,
+                "combiner_beta": combiner.beta,
             }
-            for prob_col, label in [("win_prob", "lambdarank"), ("win_prob_binary", "binary"), ("market_prob", "market")]:
+            for prob_col, label in PROB_LABELS:
                 m = race_prob_metrics(df_test, prob_col)
                 window_result[f"log_loss_{label}"] = m["log_loss"]
                 window_result[f"brier_{label}"] = m["brier"]
             window_result.update(evaluate_bets(df_test, "should_bet", df_returns, "lambdarank"))
             window_result.update(evaluate_bets(df_test, "should_bet_binary", df_returns, "binary"))
+            window_result.update(evaluate_bets(df_test, "should_bet_combined", df_returns, "combined"))
             results.append(window_result)
             test_frames.append(df_test[["race_id", "horse_num", "rank_num", "win_prob", "win_prob_binary",
-                                        "market_prob", "should_bet", "should_bet_binary"]])
+                                        "win_prob_combined", "market_prob", "market_recal_prob",
+                                        "should_bet", "should_bet_binary", "should_bet_combined"]])
 
         if results:
             df_res = pd.DataFrame(results)
@@ -284,7 +318,7 @@ class Simulator:
             print("========================================")
             print(df_res.to_string(index=False))
             print("----------------------------------------")
-            for label in ["lambdarank", "binary"]:
+            for label in BET_LABELS:
                 print(f"[{label}] Mean Recovery Rate(単勝): {df_res[f'recovery_rate_{label}'].mean():.2f}% "
                       f"(Std: {df_res[f'recovery_rate_{label}'].std():.2f}%)")
                 print(f"[{label}] Mean Recovery Rate(複勝): {df_res[f'recovery_rate_place_{label}'].mean():.2f}% "
@@ -297,13 +331,27 @@ class Simulator:
             df_pooled = pd.concat(test_frames, ignore_index=True)
             pooled = {}
             print("POOLED (all test windows)")
-            for prob_col, label in [("win_prob", "lambdarank"), ("win_prob_binary", "binary"), ("market_prob", "market")]:
+            for prob_col, label in PROB_LABELS:
                 m = race_prob_metrics(df_pooled, prob_col)
                 pooled[f"log_loss_{label}"] = m["log_loss"]
                 pooled[f"brier_{label}"] = m["brier"]
                 print(f"[{label}] Race LogLoss: {m['log_loss']:.4f}, Brier: {m['brier']:.4f} (races: {m['n_races']})")
             print("  * LogLoss/Brier は小さいほど良い。モデルが market を下回らない限り、市場より正確という根拠はない")
-            for bet_col, label in [("should_bet", "lambdarank"), ("should_bet_binary", "binary")]:
+            print("  * market_recal は市場確率のみを再校正したもの(本命・大穴バイアスの補正)。"
+                  "combined と market_recal の差がモデルの寄与")
+            for col_a, col_b, name in [("win_prob_combined", "market_recal_prob", "combined - market_recal"),
+                                       ("win_prob_combined", "market_prob", "combined - market"),
+                                       ("win_prob", "market_prob", "lambdarank - market")]:
+                mean, lower, upper = bootstrap_logloss_diff_ci(df_pooled, col_a, col_b)
+                pooled[f"log_loss_diff[{name}]"] = [mean, lower, upper]
+                print(f"LogLoss差 {name}: {mean:+.4f} (95% CI: {lower:+.4f} - {upper:+.4f})")
+            print("  * 差の信頼区間の上限が0未満のときだけ、左側が右側より正確と判断できる")
+            alphas = df_res["combiner_alpha"]
+            print(f"[combined] alpha(モデルの重み) 各期間: {', '.join(f'{a:.3f}' for a in alphas)} "
+                  f"/ alpha/SE: {', '.join(f'{z:.1f}' for z in alphas / df_res['combiner_alpha_se'])}")
+            print("  * alpha/SE がおおむね2未満なら、モデルが市場に無い情報を持つという根拠は弱い")
+            for bet_col, label in [("should_bet", "lambdarank"), ("should_bet_binary", "binary"),
+                                   ("should_bet_combined", "combined")]:
                 df_bets = df_pooled[df_pooled[bet_col]]
                 pooled[f"n_bets_{label}"] = int(len(df_bets))
                 for ticket_type, suffix in [("単勝", ""), ("複勝", "_place")]:
