@@ -139,7 +139,7 @@ def handle_predict(args):
         return
     print(f"Predicting for race: {args.race_id}")
     pred = Predictor(args.config)
-    pred.predict_race(args.race_id)
+    pred.predict_race(args.race_id, budget=args.budget)
 
 def main():
     parser = argparse.ArgumentParser(description="Keiba AI Prediction System CLI")
@@ -169,6 +169,8 @@ def main():
     # predict
     parser_pred = subparsers.add_parser("predict", help="Predict race results and output bet recommendations")
     parser_pred.add_argument("--race-id", type=str, required=True, help="Race ID to predict (12 digits)")
+    parser_pred.add_argument("--budget", type=float, default=None,
+                             help="Budget in yen. Outputs fractional-Kelly win-bet stakes within this amount")
     
     args = parser.parse_args()
     

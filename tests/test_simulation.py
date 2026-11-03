@@ -93,3 +93,44 @@ def test_bootstrap_logloss_diff_ci():
     mean, lower, upper = bootstrap_logloss_diff_ci(df, "a", "b")
     assert mean == pytest.approx(-np.log(2))
     assert (lower, upper) == pytest.approx((-np.log(2), -np.log(2)))
+
+
+def test_simulate_bankroll_known_values():
+    from src.simulation.simulator import simulate_bankroll
+    # 1日目: r1 で馬1(p=0.5, 3.0倍)だけ購入対象。フルケリー比率0.25 -> 10000円の25% = 2500円。的中で 2500/100*300 = 7500円
+    # 2日目: 資金15000円。r2 で同条件 -> 3750 -> 3700円。不的中
+    df = pd.DataFrame({
+        "date": ["2024-01-06", "2024-01-06", "2024-01-07", "2024-01-07"],
+        "race_id": ["r1", "r1", "r2", "r2"],
+        "horse_num": [1, 2, 1, 2],
+        "tansho_odds": [3.0, 1.5, 3.0, 1.5],
+        "p": [0.5, 0.5, 0.5, 0.5],
+    })
+    df_returns = pd.DataFrame({"race_id": ["r1", "r2"], "ticket_type": ["単勝", "単勝"],
+                               "horse_num": [1, 2], "payoff": [300, 150]})
+    summary, curve = simulate_bankroll(df, "p", df_returns, 10000, kelly_fraction=1.0,
+                                       odds_margin=1.0, min_expected_value=1.0)
+    assert curve["bankroll"].tolist() == pytest.approx([15000, 11300])
+    assert summary["final_bankroll"] == pytest.approx(11300)
+    assert summary["n_bets"] == 2
+    assert summary["total_stake"] == pytest.approx(6200)
+    assert summary["max_drawdown"] == pytest.approx(1 - 11300 / 15000)
+
+
+def test_simulate_bankroll_scales_down_when_day_total_exceeds_bankroll():
+    from src.simulation.simulator import simulate_bankroll
+    # 同日の5レースそれぞれでフルケリー25%を購入すると合計125%になるため、資金以内に比例縮小される
+    n = 5
+    df = pd.DataFrame({
+        "date": ["2024-01-06"] * (2 * n),
+        "race_id": [f"r{i}" for i in range(n) for _ in range(2)],
+        "horse_num": [1, 2] * n,
+        "tansho_odds": [3.0, 1.5] * n,
+        "p": [0.5, 0.5] * n,
+    })
+    df_returns = pd.DataFrame({"race_id": [f"r{i}" for i in range(n)], "ticket_type": ["単勝"] * n,
+                               "horse_num": [2] * n, "payoff": [150] * n})
+    summary, _ = simulate_bankroll(df, "p", df_returns, 10000, kelly_fraction=1.0,
+                                   odds_margin=1.0, min_expected_value=1.0)
+    assert summary["total_stake"] == pytest.approx(10000)
+    assert summary["final_bankroll"] == pytest.approx(0)
