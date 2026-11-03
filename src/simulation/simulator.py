@@ -9,7 +9,7 @@ import joblib
 import lightgbm as lgb
 from src.training.calibration import SoftmaxCalibrator, MarketCombiner
 from src.policies.score_policy import CalibratedProbPolicy, MarketCombinedProbPolicy, market_implied_probs
-from src.policies.bet_policy import ExpectedValueBet
+from src.policies.bet_policy import ExpectedValueBet, kelly_stakes
 from src.training.train import Trainer
 
 
@@ -37,6 +37,52 @@ def bootstrap_recovery_ci(df_payoff: pd.DataFrame, n_boot: int = 2000, alpha: fl
         rates[b] = sums[idx].sum() / (counts[idx].sum() * 100) * 100
     lower, upper = np.percentile(rates, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(lower), float(upper)
+
+
+def simulate_bankroll(df: pd.DataFrame, prob_col: str, df_returns: pd.DataFrame, initial_bankroll: float,
+                      kelly_fraction: float, odds_margin: float, min_expected_value: float) -> tuple:
+    """初期資金から、各レースの単勝を分数ケリーで購入し続けたときの資金推移を求める。
+    df は race_id, horse_num, date, tansho_odds, prob_col 列を持つこと。
+    レースの発走時刻を持たないため、同じ日のレースはすべてその日の開始時点の資金で同時に購入したとみなし、
+    日の終わりに精算する。同日の購入合計が資金を超える場合は全購入を比例縮小する。
+    返り値: (集計dict, 日次の資金推移DataFrame)"""
+    tansho = df_returns[df_returns["ticket_type"] == "単勝"][["race_id", "horse_num", "payoff"]]
+    d = df[["date", "race_id", "horse_num", "tansho_odds", prob_col]].merge(
+        tansho, on=["race_id", "horse_num"], how="left")
+    d["payoff"] = d["payoff"].fillna(0)
+
+    bankroll = peak = float(initial_bankroll)
+    max_drawdown = 0.0
+    n_bets = 0
+    total_stake = total_return = 0.0
+    rows = []
+    for date, day in d.groupby("date", sort=True):
+        stakes = pd.Series(0.0, index=day.index)
+        for _, race in day.groupby("race_id"):
+            stakes[race.index] = kelly_stakes(race[prob_col].values, race["tansho_odds"].values, bankroll,
+                                              kelly_fraction, odds_margin, min_expected_value)
+        if stakes.sum() > bankroll:
+            stakes = np.floor(stakes * bankroll / stakes.sum() / 100) * 100
+        day_stake = stakes.sum()
+        day_return = (stakes / 100 * day["payoff"]).sum()
+        bankroll += day_return - day_stake
+        peak = max(peak, bankroll)
+        max_drawdown = max(max_drawdown, 1 - bankroll / peak)
+        n_bets += int((stakes > 0).sum())
+        total_stake += day_stake
+        total_return += day_return
+        rows.append({"date": date, "stake": day_stake, "return": day_return, "bankroll": bankroll})
+
+    summary = {
+        "initial_bankroll": float(initial_bankroll),
+        "final_bankroll": bankroll,
+        "max_drawdown": max_drawdown,
+        "n_bets": n_bets,
+        "total_stake": total_stake,
+        "total_return": total_return,
+        "recovery_rate": total_return / total_stake * 100 if total_stake > 0 else 0.0,
+    }
+    return summary, pd.DataFrame(rows)
 
 
 def race_prob_metrics(df: pd.DataFrame, prob_col: str) -> dict:
@@ -128,6 +174,8 @@ class Simulator:
         self.odds_margin = self.config["betting"]["odds_margin"]
         self.min_expected_value = self.config["betting"]["min_expected_value"]
         self.test_start = self.config["simulation"]["test_start"]
+        self.initial_bankroll = self.config["simulation"]["initial_bankroll"]
+        self.kelly_fraction = self.config["betting"]["kelly_fraction"]
 
     def load_returns(self):
         conn = sqlite3.connect(self.db_path)
@@ -307,7 +355,8 @@ class Simulator:
             window_result.update(evaluate_bets(df_test, "should_bet_binary", df_returns, "binary"))
             window_result.update(evaluate_bets(df_test, "should_bet_combined", df_returns, "combined"))
             results.append(window_result)
-            test_frames.append(df_test[["race_id", "horse_num", "rank_num", "win_prob", "win_prob_binary",
+            test_frames.append(df_test[["race_id", "horse_num", "date", "tansho_odds", "rank_num",
+                                        "win_prob", "win_prob_binary",
                                         "win_prob_combined", "market_prob", "market_recal_prob",
                                         "should_bet", "should_bet_binary", "should_bet_combined"]])
 
@@ -364,6 +413,21 @@ class Simulator:
                     pooled[f"recovery_rate{suffix}_{label}_ci95"] = [lower, upper]
                     print(f"[{label}] Recovery Rate({ticket_type}): {rate:.2f}% "
                           f"(95% CI: {lower:.2f}% - {upper:.2f}%, bets: {len(df_pay)})")
+            print("----------------------------------------")
+            print(f"BANKROLL (初期資金 {self.initial_bankroll:,.0f}円, 単勝, {self.kelly_fraction}ケリー, "
+                  f"期待値 >= {self.min_expected_value} の馬のみ)")
+            for prob_col, label in [("win_prob", "lambdarank"), ("win_prob_binary", "binary"),
+                                    ("win_prob_combined", "combined")]:
+                summary, curve = simulate_bankroll(df_pooled, prob_col, df_returns, self.initial_bankroll,
+                                                   self.kelly_fraction, self.odds_margin, self.min_expected_value)
+                pooled[f"bankroll_{label}"] = summary
+                curve.to_csv(os.path.join(self.trainer.models_dir, f"bankroll_{label}.csv"),
+                             index=False, encoding="utf-8-sig")
+                print(f"[{label}] 最終資金: {summary['final_bankroll']:,.0f}円, "
+                      f"最大ドローダウン: {summary['max_drawdown'] * 100:.1f}%, 購入: {summary['n_bets']}件, "
+                      f"購入総額: {summary['total_stake']:,.0f}円, 回収率: {summary['recovery_rate']:.2f}%")
+            print("  * 判定に使う tansho_odds は確定オッズであり、購入時点のオッズより有利な情報を含む")
+            print(f"  * 日次の資金推移は {self.trainer.models_dir}/bankroll_<label>.csv に保存")
             print("========================================")
             
             report_path = os.path.join(self.trainer.models_dir, "simulation_report.json")

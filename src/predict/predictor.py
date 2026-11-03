@@ -8,7 +8,7 @@ from src.scraping.netkeiba_source import NetkeibaSource
 from src.preprocessing.parser import NetkeibaParser
 from src.preprocessing.features import FeatureBuilder
 from src.policies.score_policy import CalibratedProbPolicy, MarketCombinedProbPolicy
-from src.policies.bet_policy import ExpectedValueBet
+from src.policies.bet_policy import ExpectedValueBet, kelly_stakes
 from src.training.train import Trainer
 
 class Predictor:
@@ -24,8 +24,9 @@ class Predictor:
         self.builder = FeatureBuilder(config_path)
         self.odds_margin = self.config["betting"]["odds_margin"]
         self.min_expected_value = self.config["betting"]["min_expected_value"]
+        self.kelly_fraction = self.config["betting"]["kelly_fraction"]
 
-    def predict_race(self, race_id: str):
+    def predict_race(self, race_id: str, budget: float = None):
         # 1. 出馬表のHTML取得とパース
         print(f"Fetching shutuba HTML for {race_id}...")
         self.source.get_shutuba_html(race_id)
@@ -102,12 +103,16 @@ class Predictor:
         decisions = bet_policy.decide_bets(df_race, win_probs)
         df_race["should_bet"] = decisions
         df_race["expected_value"] = win_probs * (df_race["tansho_odds"] * self.odds_margin)
+        if budget is not None:
+            # 予算を資金とみなした分数ケリーの単勝購入金額(100円単位, 合計は予算以下)
+            df_race["stake"] = kelly_stakes(win_probs, df_race["tansho_odds"].values, budget,
+                                            self.kelly_fraction, self.odds_margin, self.min_expected_value)
         
         # 結果の出力
         output_cols = [
             "race_id", "race_name", "bracket_num", "horse_num", 
             "horse_id", "tansho_odds", "model_prob", "win_prob", "expected_value", "should_bet"
-        ]
+        ] + (["stake"] if budget is not None else [])
         
         output_dir = os.path.dirname(self.builder.features_dir)
         output_path = os.path.join(output_dir, f"prediction_{race_id}.csv")
@@ -123,6 +128,15 @@ class Predictor:
             print(bet_targets[["horse_num", "tansho_odds", "win_prob", "expected_value"]])
         else:
             print("\nNo bet targets found (no horses with expected value > threshold).")
+
+        if budget is not None:
+            df_stake = df_output[df_output["stake"] > 0]
+            print(f"\n--- 単勝購入案 (予算 {budget:,.0f}円, {self.kelly_fraction}ケリー) ---")
+            if df_stake.empty:
+                print("購入なし (100円未満に切り捨てられた、または期待値が閾値未満)")
+            else:
+                print(df_stake[["horse_num", "tansho_odds", "win_prob", "expected_value", "stake"]])
+                print(f"合計: {df_stake['stake'].sum():,.0f}円")
 
 if __name__ == "__main__":
     import sys
