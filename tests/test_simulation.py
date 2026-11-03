@@ -1,6 +1,9 @@
+import numpy as np
 import pandas as pd
 import pytest
-from src.simulation.simulator import evaluate_bets
+from src.simulation.simulator import (
+    evaluate_bets, market_implied_probs, race_prob_metrics, bootstrap_recovery_ci
+)
 
 
 def test_evaluate_bets_known_payoff():
@@ -41,3 +44,38 @@ def test_evaluate_bets_no_bets():
     assert result["n_bets_test"] == 0
     assert result["recovery_rate_test"] == 0.0
     assert result["hit_rate_test"] == 0.0
+
+
+def test_market_implied_probs_normalized_per_race():
+    df = pd.DataFrame({
+        "race_id": ["r1", "r1", "r2", "r2"],
+        "tansho_odds": [2.0, 2.0, 1.6, None],
+    })
+    probs = market_implied_probs(df)
+    # r1: 1/2, 1/2 -> 0.5, 0.5 / r2: オッズ欠損馬は0、残りで合計1
+    assert probs == pytest.approx([0.5, 0.5, 1.0, 0.0])
+
+
+def test_race_prob_metrics_known_values():
+    df = pd.DataFrame({
+        "race_id": ["r1", "r1", "r2", "r2", "r3", "r3"],
+        "rank_num": [1, 2, 2, 1, None, None],  # r3 は1着馬なし(除外される)
+        "p": [0.8, 0.2, 0.6, 0.4, 0.5, 0.5],
+    })
+    m = race_prob_metrics(df, "p")
+    assert m["n_races"] == 2
+    assert m["log_loss"] == pytest.approx((-np.log(0.8) - np.log(0.4)) / 2)
+    # r1: (0.8-1)^2 + 0.2^2 = 0.08 / r2: 0.6^2 + (0.4-1)^2 = 0.72
+    assert m["brier"] == pytest.approx((0.08 + 0.72) / 2)
+
+
+def test_bootstrap_recovery_ci():
+    # 全レース同一の払戻なら信頼区間は点推定(150%)に一致する
+    df_const = pd.DataFrame({"race_id": ["r1", "r2", "r3"], "payoff": [150, 150, 150]})
+    assert bootstrap_recovery_ci(df_const) == pytest.approx((150.0, 150.0))
+
+    # ばらつきがある場合、区間は点推定を含み、払戻の最小・最大の範囲内に収まる
+    df_var = pd.DataFrame({"race_id": [f"r{i}" for i in range(50)],
+                           "payoff": [0] * 45 + [1000] * 5})
+    lower, upper = bootstrap_recovery_ci(df_var)
+    assert 0.0 <= lower < 100.0 < upper <= 1000.0

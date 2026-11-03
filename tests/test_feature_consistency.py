@@ -108,3 +108,29 @@ def test_train_and_predict_time_features_match(test_env):
     assert row_c_predict["interval_days"] == row_c_train["interval_days"]
 
     parser.close()
+
+
+def test_out_of_scope_rows_excluded(test_env):
+    """仕様書§2: 障害レース・JRA以外(場コード01〜10以外)のレース、および出走取消・競走除外の馬が
+    特徴量テーブル(=学習・評価対象)から除外されることを検証する"""
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+
+    # JRA平地(場コード06=中山): 1着馬と取消馬
+    _insert_race(conn, "202406010101", "2024-01-06")
+    _insert_result(conn, "202406010101", "h_flat", rank="1")
+    _insert_result(conn, "202406010101", "h_scratched", rank="取消")
+    # JRA障害
+    _insert_race(conn, "202406010102", "2024-01-06", course_type="障")
+    _insert_result(conn, "202406010102", "h_jump", rank="1")
+    # 地方(場コード44=大井)
+    _insert_race(conn, "202444010101", "2024-01-06", place="大井")
+    _insert_result(conn, "202444010101", "h_nar", rank="1")
+    conn.commit()
+
+    df = FeatureBuilder(config_path=test_env).build_features()
+
+    assert set(df["horse_id"]) == {"h_flat"}
+    assert df["n_horses"].tolist() == [1]
+
+    parser.close()

@@ -31,26 +31,9 @@ class StdScorePolicy(ScorePolicy):
         return std_scores
 
 class CalibratedProbPolicy(ScorePolicy):
-    """校正済み勝率(期待値計算用)。各レース内の合計が1になるよう正規化する"""
+    """校正済み勝率(期待値計算用)。校正モデル(SoftmaxCalibrator)がレース内合計1の勝率を返す"""
     def __init__(self, calibration_model):
         self.calibration_model = calibration_model
 
     def calculate(self, raw_scores: np.ndarray, df_race: pd.DataFrame) -> np.ndarray:
-        probs = self.calibration_model.predict(raw_scores)
-        
-        df = df_race.copy()
-        df["prob"] = probs
-        prob_sums = df.groupby("race_id")["prob"].transform("sum")
-        
-        normalized_probs = np.zeros_like(probs)
-        valid_mask = (prob_sums > 0)
-        
-        normalized_probs[valid_mask] = probs[valid_mask] / prob_sums[valid_mask]
-        
-        # 合計が0の場合は、頭数で均等に割り振る
-        zero_mask = ~valid_mask
-        if zero_mask.any():
-            n_horses = df.groupby("race_id")["prob"].transform("count")
-            normalized_probs[zero_mask] = 1.0 / n_horses[zero_mask]
-            
-        return normalized_probs
+        return self.calibration_model.predict_proba(raw_scores, df_race["race_id"].values)

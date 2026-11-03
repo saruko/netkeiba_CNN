@@ -126,6 +126,12 @@ class FeatureBuilder:
         # 基礎マージ
         df = df_results.merge(df_races, on="race_id", how="inner")
 
+        # 仕様書§2: 対象はJRA平地のみ。race_idの5-6桁目(場コード)が01〜10以外(地方・海外)と障害レースを除外する
+        is_jra = df["race_id"].astype(str).str[4:6].isin([f"{i:02d}" for i in range(1, 11)])
+        df = df[is_jra & (df["course_type"] != "障")]
+        # 出走取消・競走除外の馬は出走していないため除外する(負例として学習やレース内確率の正規化に混入させない)
+        df = df[~df["rank"].isin(["取消", "除外"])].reset_index(drop=True)
+
         # 頭数を計算してマージ
         df_n_horses = df.groupby("race_id").size().reset_index(name="n_horses")
         df = df.merge(df_n_horses, on="race_id", how="inner")

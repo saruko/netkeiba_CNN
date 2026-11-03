@@ -59,7 +59,7 @@ class Predictor:
             
         # 4. モデルロード
         model_path = os.path.join(self.models_dir, "lgb_lambdarank.model")
-        calib_path = os.path.join(self.models_dir, "isotonic_calibration.model")
+        calib_path = os.path.join(self.models_dir, "softmax_calibration.model")
         
         if not os.path.exists(model_path) or not os.path.exists(calib_path):
             raise FileNotFoundError("Model files not found. Run training first.")

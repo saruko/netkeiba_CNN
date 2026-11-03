@@ -155,7 +155,7 @@ python main.py train --tune
 学習が完了すると `models/` フォルダに以下が保存されます:
 - `lgb_lambdarank.model` — メインの予測モデル
 - `lgb_binary.model` — 比較用の二値分類モデル
-- `isotonic_calibration.model` — 勝率の校正モデル
+- `softmax_calibration.model` — 勝率の校正モデル
 - `categories.json` — カテゴリ変数の水準(予測時の整合性に必須)
 - `experiment_*.json` — 実験ログ(再現用)
 
@@ -185,6 +185,8 @@ python main.py predict --race-id 202506050811
 
 学習済みモデルの性能を、過去データで検証します。
 半年ごとにテスト期間をスライドさせる「ウォークフォワード検証」を行います。
+`build-features` で生成済みの特徴量を読み込むため、先に `build-features` を実行してください。
+最初のテスト期間の開始日は `config.yaml` の `simulation.test_start` で設定します。
 
 ```
 python main.py simulate
@@ -192,9 +194,13 @@ python main.py simulate
 
 各期間ごとに以下が表示されます:
 - 購入件数 / 的中率 / 回収率 (単勝・複勝それぞれ)
-- LambdaRankモデル vs 二値分類モデルの比較
+- LambdaRankモデル vs 二値分類モデル vs 市場(単勝オッズの暗黙勝率) の勝率予測精度 (レース単位LogLoss・Brier)
 
-**回収率100%超 = 利益が出た期間** です。
+最後に全期間通算の結果として、上記の精度と、回収率の95%信頼区間(レース単位ブートストラップ)が表示されます。
+
+**見方:**
+- モデルの LogLoss が market より小さくない限り、「市場より正確な確率推定」という根拠はありません
+- 回収率の信頼区間の下限が100%を超えていない限り、利益が出るとは判断できません(1期間の回収率100%超は偶然でも頻繁に起こります)
 
 ---
 
