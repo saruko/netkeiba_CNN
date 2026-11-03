@@ -1,4 +1,7 @@
 requests>=2.31.0
+# 2026.10.23 未満は鍵漏洩で失効した eMudhra 中間CAにつながる emSign ECC Root CA - G3 を含む(2026.10.18/19 では除去済み)。
+# requests の依存として古い版が残らないよう下限を明示する
+certifi>=2026.10.23
 beautifulsoup4>=4.12.0
 pandas>=2.0.0
 pyarrow>=12.0.0

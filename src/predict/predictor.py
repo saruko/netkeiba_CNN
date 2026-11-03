@@ -7,7 +7,7 @@ import sqlite3
 from src.scraping.netkeiba_source import NetkeibaSource
 from src.preprocessing.parser import NetkeibaParser
 from src.preprocessing.features import FeatureBuilder
-from src.policies.score_policy import CalibratedProbPolicy
+from src.policies.score_policy import CalibratedProbPolicy, MarketCombinedProbPolicy
 from src.policies.bet_policy import ExpectedValueBet
 from src.training.train import Trainer
 
@@ -49,17 +49,14 @@ class Predictor:
             
         # 3. 特徴量生成
         print("Building features...")
-        df_all = self.builder.build_features()
-        
-        # 対象レースのデータを抽出
-        df_race = df_all[df_all["race_id"] == race_id].copy()
+        df_race = self.builder.build_features(race_ids=[race_id])
         if df_race.empty:
             print(f"No data found for race_id: {race_id}")
             return
             
         # 4. モデルロード
         model_path = os.path.join(self.models_dir, "lgb_lambdarank.model")
-        calib_path = os.path.join(self.models_dir, "isotonic_calibration.model")
+        calib_path = os.path.join(self.models_dir, "softmax_calibration.model")
         
         if not os.path.exists(model_path) or not os.path.exists(calib_path):
             raise FileNotFoundError("Model files not found. Run training first.")
@@ -84,10 +81,15 @@ class Predictor:
         X = df_race[self.trainer.features]
         raw_scores = model.predict(X)
         
-        # 校正済み勝率
-        prob_policy = CalibratedProbPolicy(calib_model)
-        win_probs = prob_policy.calculate(raw_scores, df_race)
-        
+        # 校正済み勝率。ライブオッズが取れた場合は市場との結合モデルの勝率を期待値計算に使う
+        # (結合モデルは確定オッズで推定しているため、発走前のオッズに対しては推定誤差が大きくなりうる)
+        win_probs = CalibratedProbPolicy(calib_model).calculate(raw_scores, df_race)
+        df_race["model_prob"] = win_probs
+        combiner_path = os.path.join(self.models_dir, "market_combiner.model")
+        if odds_map and os.path.exists(combiner_path):
+            win_probs = MarketCombinedProbPolicy(joblib.load(combiner_path)).calculate(raw_scores, df_race)
+            print("Using market-combined win probabilities.")
+
         df_race["raw_score"] = raw_scores
         df_race["win_prob"] = win_probs
         
@@ -104,7 +106,7 @@ class Predictor:
         # 結果の出力
         output_cols = [
             "race_id", "race_name", "bracket_num", "horse_num", 
-            "horse_id", "tansho_odds", "win_prob", "expected_value", "should_bet"
+            "horse_id", "tansho_odds", "model_prob", "win_prob", "expected_value", "should_bet"
         ]
         
         output_dir = os.path.dirname(self.builder.features_dir)

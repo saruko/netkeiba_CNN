@@ -19,14 +19,18 @@ netkeibaからデータを自動収集し、機械学習で各馬の勝率を推
 
 ### 1. Python環境の準備
 
-Python 3.10以上が必要です。
+Python 3.11以上が必要です(3.13・3.14で動作確認済み)。
 
 ```
 cd netkeiba_CNN
 python -m venv .venv
 .venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+pip を先に更新するのは、pip 自身が内蔵する証明書ストア(certifi)を新しくするためです。
+既存の `.venv` を使い回す場合も `pip install -r requirements.txt` を再実行すれば、certifi が下限の版以上に更新されます。
 
 ### 2. 動作確認
 
@@ -115,11 +119,19 @@ python main.py build-features
 ```
 
 SQLiteのデータを読み込み、以下のような特徴量をParquetファイルとして出力します:
-- 各馬の直近3走/5走/全走の平均着順・賞金・着差・上がり3F
-- 距離適性・コース適性・競馬場適性
-- 騎手・調教師の複勝率(直近1年ローリング)
-- 血統情報(父・母・父父・母父など6系統)
+- 各馬の直近3走/5走/全走の平均着順・頭数で割った相対着順・賞金・着差・上がり3F (JRA平地の過去走のみで集計)
+- スピード指数(場・コース種別・距離ごとの基準タイムとの差を、当日の馬場差とクラスで補正したもの)の直近3走/5走平均・5走最大
+- 距離帯・コース種別・競馬場ごとの相対着順
+- 過去5走のクラス水準と、前走からの昇級・降級
+- 脚質(過去5走の1角での相対位置から 逃げ/先行/差し/追込/不明 に分類)
+- 騎手・調教師の複勝率(直近1年。出走数が少ない場合は平均値に寄せて推定)
+- 種牡馬の産駒複勝率(同コース種別・同距離帯)、父・母父のID
 - 馬体重・斤量・枠番・出走頭数・レース間隔 など
+
+障害レース・地方競馬・出走取消/除外の馬は対象外として除外されます。
+
+**パーサー更新後の注意:** 頭数・クラスの列はHTMLの再パースで埋まります。既存の `data/` がある場合は、
+`build-features` の前に一度 `python main.py reparse` を実行してください(保存済みHTMLから再生成するため通信は発生しません)。
 
 ---
 
@@ -155,7 +167,7 @@ python main.py train --tune
 学習が完了すると `models/` フォルダに以下が保存されます:
 - `lgb_lambdarank.model` — メインの予測モデル
 - `lgb_binary.model` — 比較用の二値分類モデル
-- `isotonic_calibration.model` — 勝率の校正モデル
+- `softmax_calibration.model` — 勝率の校正モデル
 - `categories.json` — カテゴリ変数の水準(予測時の整合性に必須)
 - `experiment_*.json` — 実験ログ(再現用)
 
@@ -173,7 +185,8 @@ python main.py predict --race-id 202506050811
 ```
 
 出力される情報:
-- 各馬の **勝率** (校正済み、レース内合計1.0)
+- 各馬の **モデル単独の勝率** (`model_prob`、校正済み、レース内合計1.0)
+- 各馬の **勝率** (`win_prob`。ライブオッズが取れた場合はモデルと市場の結合モデルの勝率)
 - 各馬の **期待値** (勝率 × オッズ × 安全マージン)
 - 期待値が1.1を超える馬が **購入候補** として表示されます
 
@@ -185,6 +198,8 @@ python main.py predict --race-id 202506050811
 
 学習済みモデルの性能を、過去データで検証します。
 半年ごとにテスト期間をスライドさせる「ウォークフォワード検証」を行います。
+`build-features` で生成済みの特徴量を読み込むため、先に `build-features` を実行してください。
+最初のテスト期間の開始日は `config.yaml` の `simulation.test_start` で設定します。
 
 ```
 python main.py simulate
@@ -192,9 +207,16 @@ python main.py simulate
 
 各期間ごとに以下が表示されます:
 - 購入件数 / 的中率 / 回収率 (単勝・複勝それぞれ)
-- LambdaRankモデル vs 二値分類モデルの比較
+- 勝率予測精度 (レース単位LogLoss・Brier): LambdaRank / 二値分類 / 結合(combined: モデル+市場) / 市場(market) / 市場のみ再校正(market_recal)
+- 結合モデルのモデルの重み alpha とその標準誤差
 
-**回収率100%超 = 利益が出た期間** です。
+最後に全期間通算の結果として、上記の精度、LogLoss差の95%信頼区間、回収率の95%信頼区間(いずれもレース単位ブートストラップ)が表示されます。
+
+**見方:**
+- モデルの LogLoss が market より小さくない限り、「市場より正確な確率推定」という根拠はありません
+- 結合モデルの改善がモデルによるものかは「combined - market_recal」のLogLoss差で判断します。この差の信頼区間の上限が0未満で、alpha/SE がおおむね2以上のときだけ、モデルが市場に無い情報を持つと言えます
+- combined が market を下回っても、market_recal との差が有意でなければ、改善は市場確率の偏りの補正にすぎません
+- 回収率の信頼区間の下限が100%を超えていない限り、利益が出るとは判断できません(1期間の回収率100%超は偶然でも頻繁に起こります)
 
 ---
 
@@ -254,6 +276,7 @@ python main.py simulate
 | コマンド | 説明 | 所要時間目安 |
 |---------|------|-------------|
 | `python main.py scrape --start YYYY-MM --to YYYY-MM` | データ収集 | 1年分≒15時間 |
+| `python main.py reparse` | 保存済みHTMLからDBを再生成 (パーサー更新後) | データ量による |
 | `python main.py build-features` | 特徴量生成 | 数分 |
 | `python main.py train` | モデル学習 | 数分〜10分 |
 | `python main.py train --tune` | 学習+ハイパラ探索 | 30分〜1時間 |

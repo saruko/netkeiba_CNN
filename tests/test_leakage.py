@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 import sqlite3
 import yaml
+from src.preprocessing.features import FeatureBuilder, PRIOR_TOP3_RATE, PRIOR_WEIGHT, JRA_PLACE_CODES
 
 def test_feature_leakage():
     # 設定ファイルとパスのロード
@@ -32,6 +33,8 @@ def test_feature_leakage():
     df_hr = pd.read_sql_query("SELECT * FROM horse_results", conn)
     conn.close()
     df_hr["date"] = pd.to_datetime(df_hr["date"])
+    # 成績集計はJRA平地の過去走のみが対象
+    df_hr = df_hr[df_hr["race_id"].astype(str).str[4:6].isin(JRA_PLACE_CODES) & df_hr["course_type"].isin(["芝", "ダ"])]
     
     # サンプル行を抽出して検証
     sample_size = min(100, len(df))
@@ -49,7 +52,7 @@ def test_feature_leakage():
         # 過去3走の平均着順の計算検証
         if not past_races.empty:
             recent_3 = past_races.tail(3).copy()
-            recent_3["rank_num"] = pd.to_numeric(recent_3["rank"], errors="coerce")
+            recent_3["rank_num"] = FeatureBuilder._parse_rank(recent_3["rank"])
             expected_mean_3 = recent_3["rank_num"].mean()
             
             feat_val = row["rank_mean_3"]
@@ -65,17 +68,11 @@ def test_feature_leakage():
 
             n_past = len(recent_window)
             feat_val = row[feat_name]
-            if n_past >= 5:
-                expected_rate = recent_window["is_top3"].sum() / n_past
-                assert pytest.approx(feat_val, abs=1e-6) == expected_rate, (
-                    f"Leakage or calculation error detected for {col_name}={entity_id} on {race_date.date()}"
-                )
-            else:
-                # 直近365日の出走数が5未満の場合はデフォルト値(0.3)が使われる
-                assert pytest.approx(feat_val, abs=1e-6) == 0.3, (
-                    f"Default value expected for {col_name}={entity_id} on {race_date.date()} "
-                    f"(n_past={n_past})"
-                )
+            # 事前分布による縮小推定: (複勝数 + 重み*事前率) / (出走数 + 重み)
+            expected_rate = (recent_window["is_top3"].sum() + PRIOR_WEIGHT * PRIOR_TOP3_RATE) / (n_past + PRIOR_WEIGHT)
+            assert pytest.approx(feat_val, abs=1e-6) == expected_rate, (
+                f"Leakage or calculation error detected for {col_name}={entity_id} on {race_date.date()}"
+            )
 
 
 def test_split_boundary():

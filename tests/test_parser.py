@@ -135,12 +135,26 @@ def test_parse_horse_header_based(test_env):
     conn = sqlite3.connect(parser.db_path)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT date, race_id, rank, distance, course_type, place, time_sec, margin, last_3f, passing_order, prize
+        SELECT date, race_id, rank, distance, course_type, place, time_sec, margin, last_3f, passing_order, prize,
+               n_horses, race_class
         FROM horse_results WHERE horse_id=?
     """, (horse_id,))
     row = cursor.fetchone()
     assert row == ("2024-06-09", "202406030610", "1", 1600, "芝", "中山",
-                   93.5, -0.2, 34.5, "3-3-2-1", 1100.0)
+                   93.5, -0.2, 34.5, "3-3-2-1", 1100.0, 16, "その他")
 
     conn.close()
     parser.close()
+
+
+@pytest.mark.parametrize("race_name,expected", [
+    ("有馬記念(G1)", "G1"),
+    ("ジュニアカップ(L)", "オープン"),
+    ("4歳以上1勝クラス", "1勝クラス"),
+    ("4歳以上1000万下", "2勝クラス"),
+    ("3歳未勝利", "未勝利"),
+    ("2歳新馬", "新馬"),
+    ("テストレース", "その他"),
+])
+def test_parse_race_class(race_name, expected):
+    assert NetkeibaParser.parse_race_class(race_name) == expected
