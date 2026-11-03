@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 import sqlite3
 import yaml
+from src.preprocessing.features import FeatureBuilder
 
 def test_feature_leakage():
     # 設定ファイルとパスのロード
@@ -49,7 +50,7 @@ def test_feature_leakage():
         # 過去3走の平均着順の計算検証
         if not past_races.empty:
             recent_3 = past_races.tail(3).copy()
-            recent_3["rank_num"] = pd.to_numeric(recent_3["rank"], errors="coerce")
+            recent_3["rank_num"] = FeatureBuilder._parse_rank(recent_3["rank"])
             expected_mean_3 = recent_3["rank_num"].mean()
             
             feat_val = row["rank_mean_3"]

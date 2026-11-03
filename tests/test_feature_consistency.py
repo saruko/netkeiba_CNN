@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import pandas as pd
 import yaml
 import pytest
 from src.preprocessing.parser import NetkeibaParser
@@ -132,5 +133,49 @@ def test_out_of_scope_rows_excluded(test_env):
 
     assert set(df["horse_id"]) == {"h_flat"}
     assert df["n_horses"].tolist() == [1]
+
+    parser.close()
+
+
+def test_parse_rank_handles_demotion():
+    """降着・再騎乗は先頭の数字を着順とし、中止・失格などはNaNとする"""
+    ranks = pd.Series(["1", "4(降)", "9(再)", "中止", "失格", None])
+    parsed = FeatureBuilder._parse_rank(ranks)
+    assert parsed.iloc[:3].tolist() == [1, 4, 9]
+    assert parsed.iloc[3:].isna().all()
+
+
+def test_race_restricted_build_matches_full_build(test_env):
+    """build_features(race_ids=...) で得た対象レースの特徴量が、全件生成時の同レースの行と一致することを検証する
+    (当日予測では対象レースのみ計算するため、学習時と値がずれてはならない)"""
+    from src.training.train import Trainer
+
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+    dates = ["2024-01-06", "2024-01-13", "2024-01-20", "2024-01-27", "2024-02-03", "2024-02-10", "2024-02-17"]
+    for d_idx, d in enumerate(dates):
+        race_id = f"2024060101{d_idx + 1:02d}"
+        _insert_race(conn, race_id, d, distance=1200 + 200 * (d_idx % 3), course_type="芝" if d_idx % 2 else "ダ")
+        for h in range(4):
+            rank = str((h + d_idx) % 4 + 1)
+            _insert_result(conn, race_id, f"h{h}", rank=rank, jockey_id=f"j{h % 2}", trainer_id=f"t{h % 3}")
+            _insert_horse_result(conn, f"h{h}", d, race_id, rank=rank)
+    conn.commit()
+
+    builder = FeatureBuilder(config_path=test_env)
+    target = "202406010107"
+    df_full = builder.build_features()
+    df_one = builder.build_features(race_ids=[target])
+
+    full_rows = df_full[df_full["race_id"] == target].sort_values("horse_id").reset_index(drop=True)
+    one_rows = df_one.sort_values("horse_id").reset_index(drop=True)
+    assert len(one_rows) == 4
+    # カテゴリ型は水準集合が、数値型はNaNの有無でint/floatが異なりうるため、値のみを比較する
+    def normalize(df):
+        df = df.copy()
+        for col in df.select_dtypes("category").columns:
+            df[col] = df[col].astype(str)
+        return df
+    pd.testing.assert_frame_equal(normalize(full_rows[one_rows.columns]), normalize(one_rows), check_dtype=False)
 
     parser.close()

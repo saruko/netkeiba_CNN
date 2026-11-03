@@ -71,6 +71,12 @@ class FeatureBuilder:
         # 処理を高速化するため、以下のように「過去走のみ」を集計する。
         return df_hr
 
+    @staticmethod
+    def _parse_rank(rank: pd.Series) -> pd.Series:
+        """着順文字列を数値化する。降着・再騎乗(例: "4(降)", "9(再)")は先頭の数字を確定着順として扱い、
+        "中止"・"失格"などの数字で始まらないものはNaNとする"""
+        return pd.to_numeric(rank.astype(str).str.extract(r"^(\d+)")[0], errors="coerce")
+
     def _distance_band(self, distance: pd.Series) -> pd.Series:
         """距離を距離帯カテゴリに変換する (短距離<=1400, マイル<=1800, 中距離<=2200, 長距離>2200)"""
         return pd.cut(
@@ -120,7 +126,11 @@ class FeatureBuilder:
         merged = merged.sort_values("_row_id")
         return merged[feat_name].values
 
-    def build_features(self):
+    def build_features(self, race_ids=None):
+        """特徴量を生成し、年ごとにParquetへ保存して返す。
+        race_ids を指定した場合(当日予測用)は、そのレースの行だけを返しParquetは保存しない。
+        騎手・調教師の成績は全データから計算し、馬ごとの過去走集計は対象レースの出走馬に限定して計算する
+        (集計値は全件生成時と同一になる)。"""
         df_races, df_results, df_peds, df_horse_results = self._load_data()
 
         # 基礎マージ
@@ -138,7 +148,7 @@ class FeatureBuilder:
 
         # 着順の数値化
         # 「1」や「2」は数値化、「計不」や「中止」は NaN
-        df["rank_num"] = pd.to_numeric(df["rank"], errors="coerce")
+        df["rank_num"] = self._parse_rank(df["rank"])
         # 3着以内フラグ (ベースライン二値分類用)
         df["is_top3"] = (df["rank_num"] <= 3).astype(int)
         df.loc[df["rank_num"].isna(), "is_top3"] = 0 # 中止などは3着以内ではない
@@ -201,8 +211,12 @@ class FeatureBuilder:
         # horse_results から集計する。
         # horse_results には過去走の情報が格納されている。
         # 各馬について、レース日時点での過去3走、5走、全走の集計値を計算する。
+        if race_ids is not None:
+            df = df[df["race_id"].isin(race_ids)].reset_index(drop=True)
+            df_horse_results = df_horse_results[df_horse_results["horse_id"].isin(df["horse_id"])]
+
         df_hr = df_horse_results.copy()
-        df_hr["rank_num"] = pd.to_numeric(df_hr["rank"], errors="coerce")
+        df_hr["rank_num"] = self._parse_rank(df_hr["rank"])
 
         # 1角と4角の位置を抽出
         first_corners = []
@@ -354,6 +368,9 @@ class FeatureBuilder:
 
         # 保存用に年を取得
         df["year"] = df["date"].dt.year
+
+        if race_ids is not None:
+            return df
         
         # Parquet形式で年ごとに保存
         # 特徴量ディレクトリに保存

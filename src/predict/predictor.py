@@ -49,10 +49,7 @@ class Predictor:
             
         # 3. 特徴量生成
         print("Building features...")
-        df_all = self.builder.build_features()
-        
-        # 対象レースのデータを抽出
-        df_race = df_all[df_all["race_id"] == race_id].copy()
+        df_race = self.builder.build_features(race_ids=[race_id])
         if df_race.empty:
             print(f"No data found for race_id: {race_id}")
             return
