@@ -19,14 +19,18 @@ netkeibaからデータを自動収集し、機械学習で各馬の勝率を推
 
 ### 1. Python環境の準備
 
-Python 3.10以上が必要です。
+Python 3.11以上が必要です(3.13・3.14で動作確認済み)。
 
 ```
 cd netkeiba_CNN
 python -m venv .venv
 .venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+pip を先に更新するのは、pip 自身が内蔵する証明書ストア(certifi)を新しくするためです。
+既存の `.venv` を使い回す場合も `pip install -r requirements.txt` を再実行すれば、certifi が下限の版以上に更新されます。
 
 ### 2. 動作確認
 
