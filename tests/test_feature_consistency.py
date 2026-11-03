@@ -179,3 +179,90 @@ def test_race_restricted_build_matches_full_build(test_env):
     pd.testing.assert_frame_equal(normalize(full_rows[one_rows.columns]), normalize(one_rows), check_dtype=False)
 
     parser.close()
+
+
+def _insert_horse_result_full(conn, horse_id, date_str, race_id, rank, n_horses, passing_order,
+                              race_class="1勝クラス", course_type="芝", place="中山"):
+    conn.execute("""
+        INSERT OR REPLACE INTO horse_results (
+            horse_id, date, race_id, rank, distance, course_type, place,
+            time_sec, margin, last_3f, passing_order, prize, n_horses, race_class
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (horse_id, date_str, race_id, rank, 1600, course_type, place, 90.0, 0.1, 35.0,
+          passing_order, 100.0, n_horses, race_class))
+
+
+def test_entity_top3_rate_shrinkage_and_cutoff(test_env):
+    """騎手複勝率が「当日を含まない直近365日」の成績を事前分布で縮小推定した値になることを検証する"""
+    from src.preprocessing.features import PRIOR_TOP3_RATE as P, PRIOR_WEIGHT as W
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+    # 2023-01-01: 2着(複勝圏) / 2024-01-06: 1着, 5着 / 2024-01-06 同日にもう1鞍 / 2024-01-13: 対象
+    rides = [("202306010101", "2023-01-01", "2"), ("202406010101", "2024-01-06", "1"),
+             ("202406010102", "2024-01-06", "5"), ("202406010201", "2024-01-13", "4")]
+    for i, (race_id, d, rank) in enumerate(rides):
+        _insert_race(conn, race_id, d)
+        _insert_result(conn, race_id, f"h{i}", rank=rank, jockey_id="jx")
+    conn.commit()
+
+    df = FeatureBuilder(config_path=test_env).build_features().set_index("race_id")
+
+    # 初騎乗: 過去なし -> 事前分布の値
+    assert df.loc["202306010101", "jockey_top3_rate"] == pytest.approx(P)
+    # 2024-01-06: 2023-01-01 は365日超前のため窓外。同日の他レースも含まない -> 過去0走
+    assert df.loc["202406010102", "jockey_top3_rate"] == pytest.approx(P)
+    # 2024-01-13: 2024-01-06 の2走(複勝1) のみ
+    assert df.loc["202406010201", "jockey_top3_rate"] == pytest.approx((1 + W * P) / (2 + W))
+    parser.close()
+
+
+def test_relative_rank_run_style_class_and_jra_only(test_env):
+    """相対着順・1角相対位置による脚質・クラス変化が計算され、地方の過去走は成績集計から除外される一方、
+    前走間隔には含まれることを検証する"""
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+    horse_id = "hz"
+    # JRA 2走: 16頭立て1着(1角1番手, 未勝利), 8頭立て4着(1角1番手, 1勝クラス)
+    _insert_horse_result_full(conn, horse_id, "2024-01-06", "202406010101", "1", 16, "1-1", race_class="未勝利")
+    _insert_horse_result_full(conn, horse_id, "2024-02-03", "202406010201", "4", 8, "1-2", race_class="1勝クラス")
+    # 地方 1走 (場コード44): 成績集計からは除外、前走間隔には使う
+    _insert_horse_result_full(conn, horse_id, "2024-03-02", "202444030201", "10", 12, "12-12",
+                              race_class="その他", place="大井")
+    # 対象レース (2勝クラス)
+    _insert_race(conn, "202406040101", "2024-03-16")
+    conn.execute("UPDATE races SET race_class='2勝クラス' WHERE race_id='202406040101'")
+    _insert_result(conn, "202406040101", horse_id, rank="3")
+    conn.commit()
+
+    row = FeatureBuilder(config_path=test_env).build_features().set_index("race_id").loc["202406040101"]
+
+    assert row["rank_ratio_mean_all"] == pytest.approx((1 / 16 + 4 / 8) / 2)
+    assert row["rank_mean_all"] == pytest.approx(2.5)   # 地方の10着は含まない
+    assert row["interval_days"] == 14                   # 地方の 2024-03-02 からの間隔
+    assert row["run_style"] == "逃げ"                   # 1角相対位置 0, 0
+    assert row["class_level_mean_5"] == pytest.approx(0.5)
+    assert row["class_diff"] == pytest.approx(1)        # 1勝クラス -> 2勝クラス
+    parser.close()
+
+
+def test_sire_top3_rate_uses_only_past_offspring(test_env):
+    """種牡馬×コース種別の複勝率が、対象日より前の産駒成績のみから計算されることを検証する"""
+    from src.preprocessing.features import PRIOR_TOP3_RATE as P, PRIOR_WEIGHT as W
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+    for h in ["k1", "k2", "k3"]:
+        conn.execute("INSERT INTO peds (horse_id, father_id) VALUES (?, ?)", (h, "sire1"))
+    _insert_race(conn, "202406010101", "2024-01-06", course_type="芝")
+    _insert_result(conn, "202406010101", "k1", rank="1")
+    _insert_race(conn, "202406010102", "2024-01-06", course_type="ダ")
+    _insert_result(conn, "202406010102", "k2", rank="1")
+    _insert_race(conn, "202406010201", "2024-01-13", course_type="芝")
+    _insert_result(conn, "202406010201", "k3", rank="8")
+    conn.commit()
+
+    df = FeatureBuilder(config_path=test_env).build_features().set_index("race_id")
+
+    # 芝の過去産駒成績は k1 の1走(複勝1)のみ。ダートの k2 は含まない
+    assert df.loc["202406010201", "sire_top3_rate_course"] == pytest.approx((1 + W * P) / (1 + W))
+    assert df.loc["202406010101", "sire_top3_rate_course"] == pytest.approx(P)
+    parser.close()

@@ -28,16 +28,19 @@ class Trainer:
             "gender", "course_type", "direction", "weather",
             "surface_state", "race_class", "place", "run_style",
             "run_style_place", "distance_band",
-            "father_id", "mother_id", "father_of_father_id",
-            "mother_of_father_id", "father_of_mother_id", "mother_of_mother_id"
+            # 血統は仕様書§5.1の通り父・母父のみ。母・祖母などのIDはほぼ馬ごとに固有で、過学習の原因になるため使わない
+            "father_id", "father_of_mother_id"
         ]
 
         self.num_cols = [
             "bracket_num", "horse_num", "age", "weight_carrier",
             "horse_weight", "weight_diff", "n_horses", "distance",
             "jockey_top3_rate", "trainer_top3_rate",
+            "sire_top3_rate_course", "sire_top3_rate_distance",
             "rank_mean_3", "rank_mean_5", "rank_mean_all",
-            "rank_mean_by_distance_band", "rank_mean_by_course_type", "rank_mean_by_place",
+            "rank_ratio_mean_3", "rank_ratio_mean_5", "rank_ratio_mean_all",
+            "rank_ratio_mean_by_distance_band", "rank_ratio_mean_by_course_type", "rank_ratio_mean_by_place",
+            "class_level_mean_5", "class_diff",
             "prize_sum_3", "prize_sum_5", "prize_sum_all",
             "margin_mean_3", "margin_mean_5",
             "last_3f_mean_3", "last_3f_mean_5",

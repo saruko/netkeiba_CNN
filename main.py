@@ -1,4 +1,5 @@
 import os
+import glob
 import argparse
 import calendar
 import requests
@@ -96,6 +97,23 @@ def handle_scrape(args):
     parser.close()
     print("Scraping and parsing complete.")
 
+def handle_reparse(args):
+    """保存済みHTML(data/html/race, horse, ped)からSQLiteを再生成する(仕様書§4.3: パース処理の変更時はHTMLから再生成)。
+    出馬表(shutuba)は結果確定済みのレース行を未確定で上書きしうるため対象外とする。"""
+    parser = NetkeibaParser(args.config)
+    for category, parse in [("race", parser.parse_race), ("horse", parser.parse_horse), ("ped", parser.parse_ped)]:
+        files = sorted(glob.glob(os.path.join(parser.html_dir, category, "*.html.gz")))
+        print(f"Re-parsing {len(files)} {category} pages...")
+        for path in files:
+            item_id = os.path.basename(path)[:-len(".html.gz")]
+            try:
+                parse(item_id)
+            except ValueError as e:
+                # スキーマ検証エラー(HTML構造変更)は該当ページのみスキップして報告する
+                print(f"Failed to parse {category}/{item_id}: {e}")
+    parser.close()
+    print("Re-parse complete.")
+
 def handle_build_features(args):
     print("Building features...")
     builder = FeatureBuilder(args.config)
@@ -135,6 +153,9 @@ def main():
     parser_scrape.add_argument("--to", type=str, required=True, help="End date (YYYY-MM-DD or YYYY-MM)")
     parser_scrape.add_argument("--limit-races", type=int, default=None, help="Limit number of races to process (for testing)")
     
+    # reparse
+    subparsers.add_parser("reparse", help="Re-parse saved HTML into SQLite (after parser changes)")
+
     # build-features
     parser_build = subparsers.add_parser("build-features", help="Process SQLite data and build Parquet features")
     
@@ -153,6 +174,8 @@ def main():
     
     if args.command == "scrape":
         handle_scrape(args)
+    elif args.command == "reparse":
+        handle_reparse(args)
     elif args.command == "build-features":
         handle_build_features(args)
     elif args.command == "train":

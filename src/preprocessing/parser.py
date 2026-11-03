@@ -103,6 +103,8 @@ class NetkeibaParser:
         self._ensure_column("horse_results", "place", "TEXT")
         self._ensure_column("horse_results", "margin", "REAL")
         self._ensure_column("horse_results", "prize", "REAL")
+        self._ensure_column("horse_results", "n_horses", "INTEGER")
+        self._ensure_column("horse_results", "race_class", "TEXT")
         
         # peds テーブル
         cursor.execute("""
@@ -130,6 +132,29 @@ class NetkeibaParser:
 
     def close(self):
         self.conn.close()
+
+    @staticmethod
+    def parse_race_class(race_name: str) -> str:
+        """レース名からクラスを判定する (旧呼称 500万/1000万/1600万 も対応)"""
+        if "G1" in race_name:
+            return "G1"
+        if "G2" in race_name:
+            return "G2"
+        if "G3" in race_name:
+            return "G3"
+        if "オープン" in race_name or "(L)" in race_name or "OP" in race_name:
+            return "オープン"
+        if "3勝" in race_name or "1600万" in race_name:
+            return "3勝クラス"
+        if "2勝" in race_name or "1000万" in race_name:
+            return "2勝クラス"
+        if "1勝" in race_name or "500万" in race_name:
+            return "1勝クラス"
+        if "未勝利" in race_name:
+            return "未勝利"
+        if "新馬" in race_name:
+            return "新馬"
+        return "その他"
 
     def parse_margin(self, margin_str: str) -> float:
         """着差文字列を馬身換算の数値に変換する(例: 'ハナ'->0.05, 'クビ'->0.1, '1/2'->0.5, '1.1/4'->1.25)。
@@ -266,28 +291,8 @@ class NetkeibaParser:
             if state_match:
                 surface_state = state_match.group(2)
 
-        # クラス (例: 新馬, 未勝利, 1勝クラス, オープン, G1など)
-        # 通常、p.smalltxt や race_name の中、あるいは他のテキストから推測
-        # ここでは簡易的に、race_nameの中にG1/G2/G3が入っているか、または 1勝クラス 等の記述があるかでパースする
-        race_class = "その他"
-        if "G1" in race_name:
-            race_class = "G1"
-        elif "G2" in race_name:
-            race_class = "G2"
-        elif "G3" in race_name:
-            race_class = "G3"
-        elif "オープン" in race_name or "(L)" in race_name or "OP" in race_name:
-            race_class = "オープン"
-        elif "3勝" in race_name or "1600万" in race_name:
-            race_class = "3勝クラス"
-        elif "2勝" in race_name or "1000万" in race_name:
-            race_class = "2勝クラス"
-        elif "1勝" in race_name or "500万" in race_name:
-            race_class = "1勝クラス"
-        elif "未勝利" in race_name:
-            race_class = "未勝利"
-        elif "新馬" in race_name:
-            race_class = "新馬"
+        # クラス (例: 新馬, 未勝利, 1勝クラス, オープン, G1など)。race_name から判定する
+        race_class = self.parse_race_class(race_name)
 
         cursor = self.conn.cursor()
         
@@ -495,6 +500,10 @@ class NetkeibaParser:
                 continue
             r_match = re.search(r"race/.*?(\d+)", race_link.get("href"))
             race_id = r_match.group(1) if r_match else ""
+            race_class = self.parse_race_class(race_link.get_text().strip())
+
+            # 頭数 (着順・通過順位を頭数で相対化するために使う)
+            n_horses = self._to_int(get_text(cols, "頭数"))
 
             # 着順
             rank = get_text(cols, "着順")
@@ -541,12 +550,12 @@ class NetkeibaParser:
             cursor.execute("""
             INSERT OR REPLACE INTO horse_results (
                 horse_id, date, race_id, rank, distance, course_type, place,
-                time_sec, margin, last_3f, passing_order, prize
+                time_sec, margin, last_3f, passing_order, prize, n_horses, race_class
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 horse_id, date_str, race_id, rank, distance, course_type, place,
-                time_sec, margin, last_3f, passing_order, prize
+                time_sec, margin, last_3f, passing_order, prize, n_horses, race_class
             ))
 
         self.conn.commit()
@@ -806,25 +815,7 @@ class NetkeibaParser:
             if state_match:
                 surface_state = state_match.group(1)
 
-        race_class = "その他"
-        if "G1" in race_name:
-            race_class = "G1"
-        elif "G2" in race_name:
-            race_class = "G2"
-        elif "G3" in race_name:
-            race_class = "G3"
-        elif "オープン" in race_name or "(L)" in race_name or "OP" in race_name:
-            race_class = "オープン"
-        elif "3勝" in race_name:
-            race_class = "3勝クラス"
-        elif "2勝" in race_name:
-            race_class = "2勝クラス"
-        elif "1勝" in race_name:
-            race_class = "1勝クラス"
-        elif "未勝利" in race_name:
-            race_class = "未勝利"
-        elif "新馬" in race_name:
-            race_class = "新馬"
+        race_class = self.parse_race_class(race_name)
 
         cursor = self.conn.cursor()
         cursor.execute("""
