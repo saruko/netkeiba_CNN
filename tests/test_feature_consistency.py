@@ -266,3 +266,46 @@ def test_sire_top3_rate_uses_only_past_offspring(test_env):
     assert df.loc["202406010201", "sire_top3_rate_course"] == pytest.approx((1 + W * P) / (1 + W))
     assert df.loc["202406010101", "sire_top3_rate_course"] == pytest.approx(P)
     parser.close()
+
+
+def _insert_timed_run(conn, race_id, date_str, horse_id, rank, time_sec):
+    """結果(results)と馬の過去走(horse_results)の両方に、指定タイムの1走を登録する"""
+    conn.execute("""
+        INSERT OR REPLACE INTO results (race_id, horse_id, rank, horse_num, jockey_id, trainer_id, time_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (race_id, horse_id, rank, int(rank), "j", "t", time_sec))
+    conn.execute("""
+        INSERT OR REPLACE INTO horse_results (horse_id, date, race_id, rank, distance, course_type, place,
+                                              time_sec, n_horses, race_class)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (horse_id, date_str, race_id, rank, 1600, "芝", "中山", time_sec, 10, "1勝クラス"))
+
+
+def test_speed_figure_par_and_track_variant(test_env):
+    """スピード指数 = -(1000mあたりの基準タイムとの差 - 当日の馬場差) を手計算と照合する。
+    - 1〜5日目: 中山芝1600の勝ち馬タイム 96.0 秒(各日1レース) -> 6日目の基準タイム 96.0 (過去5頭)
+    - 6日目: 3レースの勝ち馬が全て 96.8 秒 -> 基準タイムとの差 0.8/1.6 = 0.5 秒/1000m が馬場差
+      馬Xは 97.6 秒で2着 -> 差 1.0 秒/1000m、指数 = -(1.0 - 0.5) = -0.5
+    - 7日目: 馬Xの出走。過去走の指数平均は -0.5"""
+    parser = NetkeibaParser(config_path=test_env)
+    conn = parser.conn
+    for day in range(1, 6):
+        race_id = f"2024060101{day:02d}"
+        date_str = f"2024-01-{day:02d}"
+        _insert_race(conn, race_id, date_str)
+        _insert_timed_run(conn, race_id, date_str, f"w{day}", "1", 96.0)
+    for r in range(1, 4):
+        race_id = f"20240601060{r}"
+        _insert_race(conn, race_id, "2024-01-06")
+        _insert_timed_run(conn, race_id, "2024-01-06", f"v{r}", "1", 96.8)
+    _insert_timed_run(conn, "202406010601", "2024-01-06", "X", "2", 97.6)
+    _insert_race(conn, "202406010701", "2024-01-07")
+    _insert_result(conn, "202406010701", "X", rank=None)
+    conn.commit()
+
+    df = FeatureBuilder(config_path=test_env).build_features()
+    row = df[(df["race_id"] == "202406010701") & (df["horse_id"] == "X")].iloc[0]
+
+    assert row["speed_fig_mean_3"] == pytest.approx(-0.5)
+    assert row["speed_fig_max_5"] == pytest.approx(-0.5)
+    parser.close()

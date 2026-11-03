@@ -45,6 +45,7 @@ class Trainer:
             "margin_mean_3", "margin_mean_5",
             "last_3f_mean_3", "last_3f_mean_5",
             "time_diff_mean_3", "time_diff_mean_5",
+            "speed_fig_mean_3", "speed_fig_mean_5", "speed_fig_max_5",
             "interval_days"
         ]
         

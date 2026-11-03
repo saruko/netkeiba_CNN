@@ -44,6 +44,13 @@
 | 回収率に信頼区間が無い | `simulator.py` レース単位ブートストラップ95%CI |
 | 当日予測のたびに全レースの特徴量を再生成・保存していた | `features.py` `build_features(race_ids=...)` |
 | ウォークフォワードのテスト開始日がハードコード | `config.yaml` `simulation.test_start` |
+| 着順・1角位置を頭数で相対化していない(脚質判定も絶対位置) | `parser.py` `horse_results.n_horses`、`features.py` `rank_ratio_*`・`run_style` |
+| 相手関係(クラス)を考慮していない | `parser.py` `horse_results.race_class`、`features.py` `class_level_mean_5`・`class_diff` |
+| 地方・海外・障害の過去走が成績集計に混入 | `features.py` 成績集計をJRA平地に限定(前走間隔は全出走) |
+| 母・祖母などのIDを高カーディナリティのカテゴリ変数として学習(過学習) | `train.py` 父・母父のみに限定、`features.py` 種牡馬の産駒複勝率 |
+| 騎手・調教師の出走数5未満で固定値0.3 | `features.py` `_entity_top3_rate` 事前分布による縮小推定 |
+| モデル単独で市場と比較しており、市場情報との結合が無い | `calibration.py` `MarketCombiner`、`simulator.py` で市場のみ再校正と比較 |
+| タイム系特徴量がコース・馬場の違いを補正していない | `features.py` `_speed_figures` |
 
 ---
 
@@ -52,5 +59,8 @@
 | 優先度 | 内容 | 箇所 |
 |--------|------|------|
 | 中 | バックテストは確定オッズで評価しており、購入時点オッズとの乖離で回収率が楽観的に出る(仕様書§13の既知リスク。`odds_margin` で一律補正のみ) | `simulator.py` |
+| 中 | スピード指数のクラス補正・馬場差は勝ち馬のみから推定しており、少頭数・少レースの開催では誤差が大きい。上がり3Fは未補正 | `features.py` `_speed_figures` |
+| 中 | `horse_results.n_horses`・`race_class` は `reparse` で埋まる。クラス判定はレース名の文字列に依存し、馬成績ページのレース名表記(G1等)は未検証 | `parser.py` |
 | 低 | 二値分類モデルのパラメータが `train.py` と `simulator.py` に重複定義 | `train.py`, `simulator.py` |
+| 低 | `features.py` `_determine_run_style` は未使用のコード | `features.py` |
 | 低 | 上記 #16, #18, 4-1, 4-4 | — |

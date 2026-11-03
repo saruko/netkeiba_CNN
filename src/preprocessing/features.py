@@ -8,6 +8,10 @@ import yaml
 PRIOR_TOP3_RATE = 0.21
 PRIOR_WEIGHT = 10
 
+# スピード指数: 基準タイムを作るのに必要な過去の勝ち馬数 / 馬場差を推定するのに必要な当日のレース数
+MIN_PAR_RACES = 5
+MIN_VARIANT_RACES = 3
+
 # JRAの場コード(race_idの5-6桁目)
 JRA_PLACE_CODES = [f"{i:02d}" for i in range(1, 11)]
 
@@ -115,6 +119,46 @@ class FeatureBuilder:
         g["rate"] = (g["top3_past"] + PRIOR_WEIGHT * PRIOR_TOP3_RATE) / (g["n_past"] + PRIOR_WEIGHT)
         rate = df[keys + ["date"]].merge(g[keys + ["date", "rate"]], on=keys + ["date"], how="left")["rate"]
         return rate.fillna(PRIOR_TOP3_RATE).values
+
+    @staticmethod
+    def _mean_before(df, keys, value_col):
+        """keys ごとに、各日付より前(当日を含まない)の value_col の平均と件数を返す (keys + date + mean + count)"""
+        daily = df.groupby(keys + ["date"])[value_col].agg(["sum", "count"]).reset_index()
+        daily = daily.sort_values(keys + ["date"]).reset_index(drop=True)
+        grp = daily.groupby(keys, sort=False)
+        count = grp["count"].cumsum() - daily["count"]
+        daily["mean"] = (grp["sum"].cumsum() - daily["sum"]) / count.where(count > 0)
+        daily["count"] = count
+        return daily[keys + ["date", "mean", "count"]]
+
+    def _speed_figures(self, df):
+        """各出走のスピード指数(1000mあたり秒。大きいほど速い)を返す (horse_id, race_id, speed_fig)。
+        - 基準タイム: 同じ場・コース種別・距離の、その日より前の勝ち馬タイムの平均(MIN_PAR_RACES頭未満なら欠損)
+        - クラス補正: クラスごとの、その日より前の勝ち馬の基準タイムとの差の平均(履歴が無ければ0)
+        - 馬場差: 当日・同じ場・同じコース種別の勝ち馬の(基準タイムとの差 - クラス補正)の平均
+          (MIN_VARIANT_RACES レース未満なら補正しない)
+        - 指数 = -(基準タイムとの差 - 馬場差)
+        いずれも対象レースの日付以前の情報のみで計算する。当日の他レースは、その走りが過去走として参照される時点では過去である。"""
+        keys = ["place", "course_type", "distance"]
+        d = df.loc[df["time_sec"] > 0, ["horse_id", "race_id", "date", "race_class", "time_sec", "rank_num"] + keys].copy()
+        d["distance"] = d["distance"].astype(float)
+
+        par = self._mean_before(d[d["rank_num"] == 1], keys, "time_sec")
+        par.loc[par["count"] < MIN_PAR_RACES, "mean"] = np.nan
+        d = d.merge(par[keys + ["date", "mean"]].rename(columns={"mean": "par"}), on=keys + ["date"], how="left")
+        d["dev"] = (d["time_sec"] - d["par"]) / d["distance"] * 1000
+
+        class_offset = self._mean_before(d[d["rank_num"] == 1], ["race_class"], "dev")
+        d = d.merge(class_offset[["race_class", "date", "mean"]].rename(columns={"mean": "class_offset"}),
+                    on=["race_class", "date"], how="left")
+        d["class_offset"] = d["class_offset"].fillna(0)
+
+        winners = d[d["rank_num"] == 1].assign(resid=lambda x: x["dev"] - x["class_offset"])
+        variant = winners.groupby(["date", "place", "course_type"])["resid"].agg(["mean", "count"]).reset_index()
+        variant["variant"] = variant["mean"].where(variant["count"] >= MIN_VARIANT_RACES, 0.0)
+        d = d.merge(variant[["date", "place", "course_type", "variant"]], on=["date", "place", "course_type"], how="left")
+        d["speed_fig"] = -(d["dev"] - d["variant"].fillna(0))
+        return d[["horse_id", "race_id", "speed_fig"]]
 
     def _distance_band(self, distance: pd.Series) -> pd.Series:
         """距離を距離帯カテゴリに変換する (短距離<=1400, マイル<=1800, 中距離<=2200, 長距離>2200)"""
@@ -228,6 +272,9 @@ class FeatureBuilder:
         df["sire_top3_rate_distance"] = self._entity_top3_rate(df, ["father_id", "_distance_band_key"], None)
         df = df.drop(columns=["_distance_band_key"])
 
+        # --- スピード指数 (全レースから計算し、下で馬の過去走に結合する) ---
+        df_speed = self._speed_figures(df)
+
         # --- 馬の過去成績集計 (リーク防止) ---
         # horse_results から集計する。
         # horse_results には過去走の情報が格納されている。
@@ -275,6 +322,8 @@ class FeatureBuilder:
             how="left"
         )
 
+        df_hr = df_hr.merge(df_speed, on=["horse_id", "race_id"], how="left")
+
         df_hr = df_hr.sort_values(["horse_id", "date"])
 
         # 頭数で相対化した着順(1着=1/頭数〜最下位=1)と1角位置(先頭=0〜最後方=1)
@@ -317,6 +366,9 @@ class FeatureBuilder:
             "last_3f_mean_5": ("last_3f", 5, "mean"),
             "time_diff_mean_3": ("time_diff", 3, "mean"),
             "time_diff_mean_5": ("time_diff", 5, "mean"),
+            "speed_fig_mean_3": ("speed_fig", 3, "mean"),
+            "speed_fig_mean_5": ("speed_fig", 5, "mean"),
+            "speed_fig_max_5": ("speed_fig", 5, "max"),
             # 脚質分類用の1角・4角平均位置
             "first_corner_mean_5": ("first_corner", 5, "mean"),
             "last_corner_mean_5": ("last_corner", 5, "mean"),
